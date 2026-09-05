@@ -34,3 +34,6 @@ build.cmd
 
 # Kiro specs (internal)
 .kiro/
+
+# Old archived files
+old/
