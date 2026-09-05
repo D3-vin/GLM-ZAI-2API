@@ -1,0 +1,36 @@
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go workspace file
+go.work
+
+# Environment files
+.env
+.env.local
+
+# Database
+tokens.sqlite
+tokens.sqlite-*
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+
+# Build directory
+build/
+build.cmd
+
+# Kiro specs (internal)
+.kiro/
