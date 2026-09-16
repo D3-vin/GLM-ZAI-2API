@@ -44,3 +44,6 @@ build.cmd
 old/venv_cffi/
 # durable curl_cffi venv for the 10minutes.email helper (m10_mail.py) — never commit
 venv_cffi/
+
+# local egress pool (WAF evasion) — never commit
+proxies.local.txt
