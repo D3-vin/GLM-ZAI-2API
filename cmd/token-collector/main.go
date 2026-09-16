@@ -318,36 +318,56 @@ func waitForZUM(page playwright.Page) error {
 	}
 }
 
-// saveTokens creates a SQLite database with the collected tokens.
+// saveTokens APPENDS the collected tokens to the SQLite store.
+//
+// It must NOT replace the file: the bridge keeps its SQLite connection open, so
+// a replaced file (new inode) leaves the running process reading the old, empty
+// database — freshly collected tokens would only appear after a bridge restart.
+// Appending to the same inode makes a refill visible immediately.
 func saveTokens(path string, tokens []string) error {
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("cannot remove old %s (is the bridge running?): %w", path, err)
-	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
+	if _, err := db.Exec("PRAGMA busy_timeout = 10000;"); err != nil {
+		return err
+	}
+	if _, err := db.Exec("PRAGMA journal_mode = WAL;"); err != nil {
+		return err
+	}
 	if _, err := db.Exec("CREATE TABLE IF NOT EXISTS tokens (id INTEGER PRIMARY KEY, token TEXT);"); err != nil {
+		return err
+	}
+	if _, err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_tokens_token ON tokens(token);"); err != nil {
 		return err
 	}
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
-	stmt, err := tx.Prepare("INSERT INTO tokens (id, token) VALUES (?, ?);")
+	stmt, err := tx.Prepare("INSERT OR IGNORE INTO tokens (token) VALUES (?);")
 	if err != nil {
 		tx.Rollback()
 		return err
 	}
 	defer stmt.Close()
-	for i, tok := range tokens {
-		if _, err := stmt.Exec(i, tok); err != nil {
+	added := 0
+	for _, tok := range tokens {
+		res, err := stmt.Exec(tok)
+		if err != nil {
 			tx.Rollback()
 			return err
 		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			added++
+		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	fmt.Printf("  Appended %d new tokens to %s (same inode — bridge restart NOT needed)\n", added, path)
+	return nil
 }
 
 // waitForEnter pauses before exit so fatal errors stay visible in the
