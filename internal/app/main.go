@@ -212,8 +212,21 @@ func runeChunkEnd(s string, i, max int) int {
 	if end > len(s) {
 		end = len(s)
 	}
-	for end < len(s) && end > i+1 && !utf8.RuneStart(s[end]) {
-		end--
+	if end >= len(s) || utf8.RuneStart(s[end]) {
+		return end
+	}
+	// Back off to a rune start, but never to (or below) i — returning i
+	// would hand the caller an empty chunk and stall its loop.
+	for e := end - 1; e > i; e-- {
+		if utf8.RuneStart(s[e]) {
+			return e
+		}
+	}
+	// No rune start in (i, end]: extend FORWARD to the next one rather than
+	// cutting the rune in half (json.Marshal would render the halves as
+	// U+FFFD). Costs at most 3 bytes of overshoot.
+	for end < len(s) && !utf8.RuneStart(s[end]) {
+		end++
 	}
 	return end
 }

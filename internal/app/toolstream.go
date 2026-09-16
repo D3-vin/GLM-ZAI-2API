@@ -10,6 +10,7 @@ import (
 	"log"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 const agentToolCallStart = "<<<TOOL_CALL>>>"
@@ -390,8 +391,19 @@ func (a *toolStreamInterceptor) feed(chunk string) (contentDelta string, toolCal
 			tail := len(agentToolCallStart) - 1
 			if safe > tail {
 				emit := safe - tail
-				contentDelta += data[a.flushed : a.flushed+emit]
-				a.flushed += emit
+				// The held-back tail is a BYTE count, so this cut can land
+				// inside a multi-byte rune (Cyrillic, emoji). json.Marshal
+				// renders each dangling byte as U+FFFD, so the client would
+				// see "±" for a 2-byte character. Back off to a rune start;
+				// when none fits, emit nothing this round — the tail stays
+				// buffered and flushFinal (or the next feed) releases it.
+				for emit > 0 && !utf8.RuneStart(data[a.flushed+emit]) {
+					emit--
+				}
+				if emit > 0 {
+					contentDelta += data[a.flushed : a.flushed+emit]
+					a.flushed += emit
+				}
 			}
 			return
 		}
