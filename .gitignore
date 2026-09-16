@@ -36,4 +36,6 @@ build.cmd
 .kiro/
 
 # Old archived files
-old/
+old/venv_cffi/
+# durable curl_cffi venv for the 10minutes.email helper (m10_mail.py) — never commit
+venv_cffi/
