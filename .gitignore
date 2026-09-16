@@ -19,6 +19,8 @@ tokens.sqlite-*
 # Live pool JWTs (never commit)
 zai_tokens.txt
 zai_tokens.txt.*
+# Build artifact (Go binary, 16 MB)
+/glm-zai-2api
 
 # IDEs
 .vscode/
