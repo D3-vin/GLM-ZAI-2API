@@ -318,6 +318,24 @@ func waitForZUM(page playwright.Page) error {
 	}
 }
 
+// ensureTokenIndex guarantees UNIQUE(token), so INSERT OR IGNORE really dedupes.
+//
+// A UNIQUE index cannot be built while duplicate rows exist — the historical
+// state of DBs written before this guard. Aborting on that error loses the whole
+// collection run (fresh tokens are dropped and the pool keeps draining), so
+// treat it as self-healing: drop duplicate rows keeping the lowest id, then
+// create the index. Safe to call on every run.
+func ensureTokenIndex(db *sql.DB) error {
+	if _, err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_tokens_token ON tokens(token);"); err == nil {
+		return nil
+	}
+	if _, err := db.Exec("DELETE FROM tokens WHERE id NOT IN (SELECT MIN(id) FROM tokens GROUP BY token);"); err != nil {
+		return err
+	}
+	_, err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_tokens_token ON tokens(token);")
+	return err
+}
+
 // saveTokens APPENDS the collected tokens to the SQLite store.
 //
 // It must NOT replace the file: the bridge keeps its SQLite connection open, so
@@ -339,7 +357,7 @@ func saveTokens(path string, tokens []string) error {
 	if _, err := db.Exec("CREATE TABLE IF NOT EXISTS tokens (id INTEGER PRIMARY KEY, token TEXT);"); err != nil {
 		return err
 	}
-	if _, err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_tokens_token ON tokens(token);"); err != nil {
+	if err := ensureTokenIndex(db); err != nil {
 		return err
 	}
 	tx, err := db.Begin()
