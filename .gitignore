@@ -16,6 +16,9 @@ go.work
 # Database
 tokens.sqlite
 tokens.sqlite-*
+# Live pool JWTs (never commit)
+zai_tokens.txt
+zai_tokens.txt.*
 
 # IDEs
 .vscode/
