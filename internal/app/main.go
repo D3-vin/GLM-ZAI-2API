@@ -64,6 +64,19 @@ func envOr(key, def string) string {
 	return def
 }
 
+// maskSecret renders a secret for logs: length plus a short prefix, never the
+// full value. Startup banners land in journalctl, so secrets must never be
+// printed verbatim (see ops-vault runbook 2026-09-16).
+func maskSecret(s string) string {
+	if s == "" {
+		return "(unset)"
+	}
+	if len(s) <= 4 {
+		return fmt.Sprintf("**** (len %d)", len(s))
+	}
+	return fmt.Sprintf("%s… (len %d)", s[:4], len(s))
+}
+
 func envIntOr(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		var n int
@@ -1219,7 +1232,7 @@ func Main() {
 ║  Token DB:      %s (%d tokens)
 ║  Auth Token:    %s
 ╚═══════════════════════════════════════════════════════════════╝
-`, cfg.Port, cfg.Port, cfg.DBPath, tokenCount, cfg.AuthToken)
+`, cfg.Port, cfg.Port, cfg.DBPath, tokenCount, maskSecret(cfg.AuthToken))
 
 	// Initialize the session with the account pool's current candidate
 	// (falls back to the single ZAI_TOKEN when no pool file exists);
