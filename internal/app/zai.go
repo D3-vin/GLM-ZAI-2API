@@ -708,7 +708,7 @@ var errZAIStreamCut = fmt.Errorf("zai stream cut before done")
 // before giving up.
 func zaiSendAttempts() int {
 	attempts := 2
-	if n := len(proxies.urls); n > 0 {
+	if n := len(proxies.list()); n > 0 {
 		attempts += n
 	}
 	return attempts

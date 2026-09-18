@@ -1210,8 +1210,10 @@ func Main() {
 		if err := loadProxyPool(cfg.ProxyFile); err != nil {
 			log.Printf("[Proxy] %v — continuing without proxies", err)
 		} else {
+			list := proxies.list()
 			log.Printf("[Proxy] %d proxies loaded from %s, active: %s",
-				len(proxies.urls), cfg.ProxyFile, proxies.urls[0].Redacted())
+				len(list), cfg.ProxyFile, list[0].Redacted())
+			watchProxyFile() // pick up routes rewritten by the pool watchdog
 		}
 	}
 
