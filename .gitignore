@@ -8,7 +8,13 @@
 
 # Go workspace file
 go.work
-*_test.go
+
+# NOTE: do NOT add a blanket `*_test.go` ignore here. It silently excluded the
+# real regression test internal/app/runesafety_test.go (utf8 rune-split fix,
+# commit ae5b633): the file stayed untracked, so `go test` never saw it in a
+# fresh checkout. Test binaries are already covered by `*.test` above.
+# Tracked tests so far: cmd/token-collector/main_test.go (force-added when the
+# ignore was in effect), internal/app/runesafety_test.go (see this change).
 # Environment files
 .env
 .env.local
