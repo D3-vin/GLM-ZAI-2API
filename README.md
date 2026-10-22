@@ -18,11 +18,11 @@ OpenAI-compatible proxy for Z.AI (GLM models) — single Go binary.
 
 ## Features
 
-- 🚀 **Single binary** — server, captcha solver, and token store in one Go binary; no pipes, no external services
+- 🚀 **Single binary** — server, captcha handler, and token store in one Go binary; no pipes, no external services
 - 🔓 **Three protocols** — `/v1/chat/completions` (OpenAI), `/v1/messages` (Anthropic — Claude Code), `/v1/responses` (Responses API — Codex CLI)
 - 🧩 **Tool calling** — full function calling incl. live streaming interception of `<<<TOOL_CALL>>>` blocks; works out of the box
 - 🖼️ **Vision** — image input (URL or base64) on all three protocols via `GLM-5v-Turbo` (files are uploaded to Z.AI automatically)
-- 🛡️ **In-process captcha** — Aliyun Captcha V3 solved directly in-process (DeviceData-bound, HAR-matched timings)
+- 🛡️ **In-process captcha** — Aliyun Captcha V3 handled directly in-process (DeviceData-bound, HAR-matched timings)
 - 🧠 **Live model catalog** — fetched from Z.AI with a browser fingerprint + snapshot fallback; `reasoning_effort` support
 - 👥 **Account pool** — `ZAI_TOKENS_FILE` with startup validation and auto-rotation on USER_BLOCKED
 - 🌐 **WAF proxy rotation** — chat goes direct first; on an Aliyun WAF block retries rotate through `PROXY_FILE`
@@ -54,7 +54,7 @@ go build -trimpath -ldflags="-s -w" -o glm-zai-2api ./cmd/server
 
 ### 2. Collect device tokens (requires Google Chrome installed)
 
-The captcha solver needs a pool of device tokens:
+The captcha handler needs a pool of device tokens:
 
 ```bash
 go build -o token-collector ./cmd/token-collector/
@@ -175,7 +175,7 @@ Z.AI has no native function calling. The proxy implements an adapter:
 ./token-collector --headed              # visible browser (control)
 ```
 
-Collects up to 1250 device tokens via **playwright-go** with a stealth headless Chrome (flag-only stealth: `--headless=new`, real Chrome UA, automation flag stripped). Tokens are consumed by the captcha solver and removed after use. The collector rewrites `tokens.sqlite` from scratch — stop the bridge while collecting.
+Collects up to 1250 device tokens via **playwright-go** with a headless Chrome (`--headless=new`, real Chrome UA, automation flag stripped). Tokens are consumed by the captcha handler and removed after use. The collector rewrites `tokens.sqlite` from scratch — stop the bridge while collecting.
 
 ---
 
@@ -184,7 +184,7 @@ Collects up to 1250 device tokens via **playwright-go** with a stealth headless 
 ```
 ├── cmd/
 │   ├── server/              # Thin entry point → internal/app.Main()
-│   └── token-collector/     # Device token collector (playwright-go, stealth headless)
+│   └── token-collector/     # Device token collector (playwright-go, headless)
 ├── internal/app/            # All bridge logic + tests (package app)
 │   ├── main.go              # Config, routes, handlers, startup
 │   ├── zai.go               # Z.AI session, signature, SSE (tls-client Chrome_146)
@@ -252,7 +252,7 @@ Optional CLI flags (override env / defaults):
 | `No device tokens available` | All tokens consumed | Re-run the collector; each token is single-use |
 | `401` from Z.AI | JWT expired | Set a fresh `ZAI_TOKEN`, or restart (guest flow re-initializes) |
 | Empty stream response | Captcha/network error | Set `LOG_LEVEL=debug`, inspect SSE logs |
-| `blocked by Aliyun WAF` (405) | Rate limit on your IP | Set a fresh `PROXY_FILE` + `USE_PROXY=true` (chat retries rotate proxies), or wait the ban out |
+| `blocked by Aliyun WAF` (405) | Rate limit on your IP | Set a fresh `PROXY_FILE` + `USE_PROXY=true` (chat retries rotate proxies), or pause and retry later |
 | Empty answer via proxy | Proxy drops long thinking streams | Prefer short answers / `deepThink:false`, or a better proxy |
 | `file upload unauthorized (401)` | Guest session + image input | Set a logged-in `ZAI_TOKEN` — vision requires it |
 | `Model not available for current user level` | Guest account + GLM-5 model | Set `ZAI_TOKEN` with a real account |
@@ -269,4 +269,10 @@ Optional CLI flags (override env / defaults):
 
 ## License
 
-Provided as-is for educational and interoperability purposes. Use responsibly and in accordance with Z.AI's terms of service.
+Provided as-is for educational and interoperability purposes — see [LICENSE](LICENSE).
+
+## ⚠️ Disclaimer
+
+This software is provided **for educational and interoperability purposes only**, "AS IS", without warranty of any kind. The author is not responsible for any misuse or consequences — responsibility lies entirely on the end user. Use in accordance with Z.AI's Terms of Service. Not affiliated with Z.AI or Alibaba Cloud.
+
+> ПО предоставляется исключительно в образовательных и ознакомительных целях, «как есть». Автор не несёт ответственности за использование.
