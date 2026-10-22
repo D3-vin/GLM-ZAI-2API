@@ -18,11 +18,11 @@ OpenAI-совместимый прокси для Z.AI (GLM-модели) — о
 
 ## Возможности
 
-- 🚀 **Один бинарник** — сервер, решатель капчи и хранилище токенов в одном Go-бинарнике; без пайпов, без внешних сервисов
+- 🚀 **Один бинарник** — сервер, обработчик капчи и хранилище токенов в одном Go-бинарнике; без пайпов, без внешних сервисов
 - 🔓 **Три протокола** — `/v1/chat/completions` (OpenAI), `/v1/messages` (Anthropic — Claude Code), `/v1/responses` (Responses API — Codex CLI)
 - 🧩 **Tool calling** — полная поддержка function calling, включая перехват блоков `<<<TOOL_CALL>>>` в живом стриме; работает из коробки
 - 🖼️ **Vision** — картинки (URL или base64) на всех трёх протоколах через `GLM-5v-Turbo` (файлы загружаются в Z.AI автоматически)
-- 🛡️ **Капча in-process** — Aliyun Captcha V3 решается прямо в процессе (DeviceData, тайминги по HAR)
+- 🛡️ **Капча in-process** — Aliyun Captcha V3 обрабатывается прямо в процессе (DeviceData, тайминги по HAR)
 - 🧠 **Живой каталог моделей** — тянется из Z.AI с браузерным отпечатком + snapshot-фолбэк; поддержка `reasoning_effort`
 - 👥 **Пул аккаунтов** — `ZAI_TOKENS_FILE` с валидацией при старте и авторотацией при USER_BLOCKED
 - 🌐 **Ротация прокси при WAF** — чат сначала идёт напрямую; после блока Aliyun WAF ретраи уезжают через `PROXY_FILE`
@@ -54,14 +54,14 @@ go build -trimpath -ldflags="-s -w" -o glm-zai-2api ./cmd/server
 
 ### 2. Сбор device-токенов (нужен Chrome/Chromium)
 
-Решателю капчи нужен пул device-токенов:
+Обработчику капчи нужен пул device-токенов:
 
 ```bash
 go build -o token-collector ./cmd/token-collector/
 ./token-collector --count 750 --out tokens.sqlite
 ```
 
-First run downloads the playwright driver (~40 MB, one-time); the browser itself is your system Chrome — ничего больше не устанавливается.
+Первый запуск скачивает playwright-драйвер (~40 МБ, один раз); сам браузер — ваш системный Chrome, ничего больше не устанавливается.
 
 ### 3. Конфигурация
 
@@ -175,7 +175,7 @@ Z.AI не поддерживает нативный function calling. Прокс
 ./token-collector --headed              # видимый браузер (контроль)
 ```
 
-Собирает до 1250 device-токенов через **playwright-go** со стелс-headless Chrome (стелс только флагами: `--headless=new`, настоящий UA Chrome, флаг автоматизации снят). Токены расходуются решателем капчи и удаляются после использования. Сборщик перезаписывает `tokens.sqlite` с нуля — на время сбора остановите мост.
+Собирает до 1250 device-токенов через **playwright-go** с headless Chrome (`--headless=new`, настоящий UA Chrome, флаг автоматизации снят). Токены расходуются обработчиком капчи и удаляются после использования. Сборщик перезаписывает `tokens.sqlite` с нуля — на время сбора остановите мост.
 
 ---
 
@@ -184,7 +184,7 @@ Z.AI не поддерживает нативный function calling. Прокс
 ```
 ├── cmd/
 │   ├── server/              # Thin entry point → internal/app.Main()
-│   └── token-collector/     # Device token collector (playwright-go, stealth headless)
+│   └── token-collector/     # Device token collector (playwright-go, headless)
 ├── internal/app/            # All bridge logic + tests (package app)
 │   ├── main.go              # Config, routes, handlers, startup
 │   ├── zai.go               # Z.AI session, signature, SSE (tls-client Chrome_146)
@@ -222,7 +222,7 @@ Z.AI не поддерживает нативный function calling. Прокс
 | `USE_PROXY` / `PROXY_FILE` | `false` / `proxy.txt` | Ротация при WAF: после блока чат-ретраи идут через пул прокси |
 | `TIMEOUT` | `300000` | Таймаут запроса, мс |
 | `CLAUDE_DESKTOP` | `false` | Алиасы `claude-*` на `/v1/models` + `/v1/messages` |
-| `ANTHROPIC_ZAI_MIN_MS` | `1500` | Минимальный пауз между отправками Z.AI для `/v1/messages` |
+| `ANTHROPIC_ZAI_MIN_MS` | `1500` | Минимальная пауза между отправками Z.AI для `/v1/messages` |
 
 > `.env` читается **только при старте** — после правки перезапустите мост.
 
@@ -252,7 +252,7 @@ Z.AI не поддерживает нативный function calling. Прокс
 | `No device tokens available` | Все токены израсходованы | Перезапустите сборщик; каждый токен одноразовый |
 | `401` от Z.AI | Истёк JWT | Задайте свежий `ZAI_TOKEN` или перезапустите (guest flow переинициализируется) |
 | Пустой ответ стрима | Ошибка капчи/сети | Включите `LOG_LEVEL=debug`, смотрите логи SSE |
-| `blocked by Aliyun WAF` (405) | Rate-limit на ваш IP | Пропишите свежий `PROXY_FILE` + `USE_PROXY=true` (ретраи чата уйдут через прокси) или подождите снятия бана |
+| `blocked by Aliyun WAF` (405) | Rate-limit на ваш IP | Пропишите свежий `PROXY_FILE` + `USE_PROXY=true` (ретраи чата уйдут через прокси) или сделайте паузу и повторите позже |
 | Пустой ответ через прокси | Прокси рвёт долгие thinking-стримы | Короткие ответы / `deepThink:false` или прокси получше |
 | `file upload unauthorized (401)` | Guest-сессия + картинка | Задайте залогиненный `ZAI_TOKEN` — vision без него не работает |
 | `Model not available for current user level` | Guest-аккаунт + GLM-5 модель | Задайте `ZAI_TOKEN` реального аккаунта |
@@ -269,4 +269,10 @@ Z.AI не поддерживает нативный function calling. Прокс
 
 ## Лицензия
 
-Предоставляется «как есть» в образовательных целях и для целей совместимости. Используйте ответственно и в соответствии с условиями сервиса Z.AI.
+Предоставляется «как есть» в образовательных целях и для целей совместимости — см. файл [LICENSE](LICENSE).
+
+## ⚠️ Отказ от ответственности
+
+ПО предоставляется **исключительно в образовательных и ознакомительных целях и для целей совместимости**, «как есть» (AS IS), без каких-либо гарантий. Автор не несёт ответственности за любое использование и последствия — вся ответственность лежит на конечном пользователе. Используйте в соответствии с условиями сервиса Z.AI. Не аффилировано с Z.AI и Alibaba Cloud.
+
+> This software is provided for educational and interoperability purposes only, "AS IS". The author is not responsible for any misuse.
