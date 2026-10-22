@@ -23,13 +23,16 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,6 +53,158 @@ const (
 // not see "HeadlessChrome" in navigator.userAgent — z_um bakes it into the
 // device token and Aliyun rejects it (F001).
 const collectorUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+
+// oddiProxyURL is the single source of egress routes (oddi-pool-api) — the
+// banned free-proxy-file pattern is not used for the collector. The API
+// returns only status='working' routes already ordered stability-first
+// (success_rate desc, fail_streak asc, latency asc), so the collector no
+// longer needs its own probe/rotation.
+//
+// Auth: ODDI_PROXY_TOKEN wins; otherwise the token is read from the pool API's
+// own token file (same box, root-only 0600). Falling back to the file keeps the
+// collector self-sufficient — an operator running it by hand (or from a cron
+// wrapper that forgets the env) still gets a routed run instead of a silent
+// direct-egress one.
+//
+// ODDI_PROXY_DISABLE=1 turns routing off (direct egress).
+const (
+	// oct22: ask for a wider candidate list. With limit=5 the API returned only
+	// the five freshest routes, and when all five were dead the collector fell
+	// back to direct egress mid-run instead of looking further down the pool —
+	// observed on 2026-10-22: five stale socks5 routes, the first live one
+	// (87.192.231.122:3128) sat at position 6 and was never requested at all.
+	// The pool holds hundreds of routes; requesting 40 costs one cheap call and
+	// leaves the pre-flight probe to reject the dead ones.
+	oddiProxyDefault = "http://127.0.0.1:9121/v1/proxies?limit=40"
+	oddiTokenDefault = "/root/.hermes/scripts/oddi-pool-api/.token"
+)
+
+// oddiToken resolves the oddi-pool-api bearer token ("" when none found).
+func oddiToken() string {
+	if tok := os.Getenv("ODDI_PROXY_TOKEN"); tok != "" {
+		return tok
+	}
+	path := os.Getenv("ODDI_TOKEN_FILE")
+	if path == "" {
+		path = oddiTokenDefault
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// pickEgressRoute asks oddi-pool-api for working routes and returns the first
+// one that actually reaches chat.z.ai as a Chrome --proxy-server value.
+//
+// Why probe: the pool's status='working' is a historical verdict from the last
+// check, not a live guarantee — on 2026-10-18 six "working" routes in a row
+// were dead (rc=000) and only the seventh answered 200. Handing Chrome a dead
+// route costs a full browser launch plus a retry cycle, so we verify with a
+// cheap pre-flight GET before committing. Returns "" when the pool is
+// disabled/unreachable or no candidate answers — the caller then launches
+// without a proxy rather than failing the run.
+//
+// Env: ODDI_PROXY_DISABLE=1 -> off; ODDI_PROXY_URL, ODDI_PROXY_TOKEN,
+// ODDI_PROXY_TRIES (default 6), ODDI_PROXY_TIMEOUT (seconds, default 12).
+func pickEgressRoute() string {
+	if os.Getenv("ODDI_PROXY_DISABLE") == "1" {
+		return ""
+	}
+	api := os.Getenv("ODDI_PROXY_URL")
+	if api == "" {
+		api = oddiProxyDefault
+	}
+	// oct22: was 6. The pool carries hundreds of routes and a large share are
+	// dead at any moment (5 of the first 5 were dead on 2026-10-22), so six
+	// probes routinely exhausted before reaching a live one. Each probe is a
+	// 12s-bounded GET and a dead route usually fails fast (connection refused)
+	// or burns the full timeout (dead tunnel); 12 leaves room for a mixed run
+	// while staying inside the wrapper's 280s collector budget.
+	tries := 12
+	if v := os.Getenv("ODDI_PROXY_TRIES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			tries = n
+		}
+	}
+	timeout := 12 * time.Second
+	if v := os.Getenv("ODDI_PROXY_TIMEOUT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			timeout = time.Duration(n) * time.Second
+		}
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, api, nil)
+	if err != nil {
+		return ""
+	}
+	if tok := oddiToken(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Printf("  oddi proxy API unreachable (%v) - direct egress\n", err)
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("  oddi proxy API http=%d - direct egress\n", resp.StatusCode)
+		return ""
+	}
+	var body struct {
+		Proxies []struct {
+			Protocol string `json:"protocol"`
+			Host     string `json:"host"`
+			Port     int    `json:"port"`
+		} `json:"proxies"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil || len(body.Proxies) == 0 {
+		fmt.Printf("  oddi proxy API returned no routes - direct egress\n")
+		return ""
+	}
+	for i, p := range body.Proxies {
+		if i >= tries {
+			break
+		}
+		scheme := p.Protocol
+		if scheme == "" {
+			scheme = "http"
+		}
+		url := fmt.Sprintf("%s://%s:%d", scheme, p.Host, p.Port)
+		if proxyReachesZAI(url, timeout) {
+			fmt.Printf("  egress route: %s (from oddi-pool-api, verified)\n", url)
+			return url
+		}
+		fmt.Printf("  route %s did not answer - trying next\n", url)
+	}
+	fmt.Printf("  no oddi route reached chat.z.ai - direct egress\n")
+	return ""
+}
+
+// proxyReachesZAI pre-flights one route: does an HTTP GET to chat.z.ai through
+// it come back with a status code? Any response proves the tunnel carries
+// traffic (a WAF 403 still means the route works); a transport error does not.
+//
+// oct22: HEAD-first. A dead tunnel burns the full timeout waiting for headers
+// that never arrive (measured: 12s per dead socks5 route), and with 12 tries
+// that alone can exceed the wrapper's 280s collector budget. HEAD is enough to
+// prove the tunnel carries traffic and is what a pre-flight needs; the browser
+// does the real GET afterwards.
+func proxyReachesZAI(proxyURL string, timeout time.Duration) bool {
+	pu, err := url.Parse(proxyURL)
+	if err != nil {
+		return false
+	}
+	tr := &http.Transport{Proxy: http.ProxyURL(pu)}
+	client := &http.Client{Timeout: timeout, Transport: tr}
+	resp, err := client.Head(zaiURL + "/")
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode > 0
+}
 
 func main() {
 	var (
@@ -78,11 +233,11 @@ func main() {
 	}
 	defer pw.Stop()
 
-	browser, err := launchBrowser(pw, headed)
+	route := pickEgressRoute()
+	browser, err := launchBrowser(pw, headed, route)
 	if err != nil {
 		log.Fatalf("launch: %v", err)
 	}
-	defer browser.Close()
 
 	var success bool
 	for attempt := 1; attempt <= maxRetries; attempt++ {
@@ -99,8 +254,41 @@ func main() {
 		success = true
 		break
 	}
+	browser.Close()
+
+	// oct22: direct-egress fallback. Routing through oddi-pool-api is the
+	// preferred path, but the pool's "working" routes are volatile: on
+	// 2026-10-22 every candidate in the first 40 either timed out or reset the
+	// connection, and each routed browser run burned its full retry budget.
+	// chat.z.ai answered directly (HTTP 200, 0.35s) the whole time, so a run
+	// that fails with a proxy still has a good chance without one. Only when a
+	// route was actually used — a run that started direct has nothing to fall
+	// back from, and repeating it would just double the wall time.
+	if !success && route != "" {
+		fmt.Printf("\nAll %d attempts failed via %s - retrying with direct egress\n", maxRetries, route)
+		browser, err = launchBrowser(pw, headed, "")
+		if err != nil {
+			log.Fatalf("launch (direct): %v", err)
+		}
+		defer browser.Close()
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			fmt.Printf("\nDirect attempt %d of %d\n", attempt, maxRetries)
+			err := tryCollect(browser, count, outPath)
+			if err != nil {
+				fmt.Printf("  Direct attempt %d failed: %v\n", attempt, err)
+				if attempt == maxRetries {
+					break
+				}
+				fmt.Println("  Retrying with a fresh page...")
+				continue
+			}
+			success = true
+			break
+		}
+	}
+
 	if !success {
-		fmt.Println("Failed after maximum retries.")
+		fmt.Println("Failed after maximum retries (proxy and direct).")
 		waitForEnter()
 		os.Exit(1)
 	}
@@ -179,7 +367,7 @@ func retryInstallDirect() error {
 //   - Channel:"chrome" uses the installed system Chrome (no download);
 //   - --user-agent kills the HeadlessChrome tell;
 //   - --enable-automation stripped from Playwright defaults.
-func launchBrowser(pw *playwright.Playwright, headed bool) (playwright.Browser, error) {
+func launchBrowser(pw *playwright.Playwright, headed bool, route string) (playwright.Browser, error) {
 	base := []string{
 		"--disable-blink-features=AutomationControlled",
 		"--user-agent=" + collectorUA,
@@ -189,6 +377,12 @@ func launchBrowser(pw *playwright.Playwright, headed bool) (playwright.Browser, 
 		"--no-default-browser-check",
 		"--password-store=basic",
 		"--use-mock-keychain",
+	}
+	if route != "" {
+		// Route the browser through the oddi-pool egress route. Chrome takes
+		// scheme://host:port for --proxy-server (socks5:// included), which is
+		// why pickEgressRoute returns the fully-qualified URL.
+		base = append(base, "--proxy-server="+route)
 	}
 	launch := playwright.BrowserTypeLaunchOptions{
 		Channel:           playwright.String("chrome"), // system Chrome, no download
