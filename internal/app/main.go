@@ -39,10 +39,13 @@ type Config struct {
 
 func loadConfig() *Config {
 	cfg := &Config{
-		Host:           envOr("HOST", "0.0.0.0"),
-		Port:           envOr("PORT", "5082"),
-		AuthEnabled:    true,
-		AuthToken:      envOr("AUTH_TOKEN", "d3vin"),
+		Host:        envOr("HOST", "0.0.0.0"),
+		Port:        envOr("PORT", "5082"),
+		AuthEnabled: true,
+		// Fail-fast: never start with the legacy public default token (ops-vault
+		// runbook 2026-09-16: startup banners land in journalctl, so a shipped
+		// default becomes a public secret). AUTH_TOKEN must be explicitly set.
+		AuthToken:      envOrRequired("AUTH_TOKEN"),
 		ZAIToken:       envOr("ZAI_TOKEN", ""),
 		ZAITokensFile:  envOr("ZAI_TOKENS_FILE", "zai_tokens.txt"),
 		UseAccountPool: envOr("USE_ACCOUNT_POOL", "") == "true",
@@ -62,6 +65,17 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// envOrRequired behaves like envOr but refuses to start on an empty value:
+// fail-fast beats shipping with a public default secret (ops-vault runbook
+// 2026-09-16). The process dies before binding any listener.
+func envOrRequired(key string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	log.Fatalf("[Config] %s is required but not set (refusing to start with a default secret)", key)
+	return ""
 }
 
 // maskSecret renders a secret for logs: length plus a short prefix, never the
@@ -748,6 +762,29 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request, prompt
 		return
 	}
 
+	// Pre-flight: the FIRST attempt gets the full captcha resolution here, so
+	// any failure it can hit (empty pool, captcha rejected, route dead, HTTP
+	// error from Z.AI) becomes a real HTTP status. Committing 200 first made
+	// every such failure look like a successful completion with no content —
+	// the caller sees finish_reason=stop and an empty answer, retries nothing
+	// and alerts nothing.
+	param, err := s.preflightCaptcha(model, opts)
+	if err != nil {
+		log.Printf("[Stream] Preflight failed: %v", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]string{
+				"message": err.Error(),
+				"type":    "upstream_unavailable",
+				"code":    "captcha_preflight_failed",
+			},
+		})
+		return
+	}
+	opts.captchaParam = param
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -801,10 +838,8 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request, prompt
 
 	if err != nil {
 		log.Printf("[Stream] Error: %v", err)
-		errJSON, _ := json.Marshal(map[string]interface{}{"error": map[string]string{"message": err.Error()}})
-		writeMu.Lock()
-		fmt.Fprintf(w, "data: %s\n\n", errJSON)
-		writeMu.Unlock()
+		// mid-stream failure: the client has already consumed this response's
+		// headers. fall through to a terminal [DONE] below.
 	}
 
 	// Final chunk
@@ -1226,6 +1261,14 @@ func Main() {
 	} else {
 		defer tokenStore.Close()
 		tokenCount = tokenStore.Count()
+		// Persistent pool memory (alive/dead verdicts across restarts).
+		// Reuses the SAME *sql.DB handle as the token store: a second
+		// connection to tokens.sqlite would contend for the write lock
+		// (modernc/sqlite defaults to busy_timeout=0) and make captcha
+		// verification fail with SQLITE_BUSY under load.
+		if cfg.UseAccountPool {
+			openPoolState(tokenStore)
+		}
 	}
 
 	srv := &Server{

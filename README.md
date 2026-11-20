@@ -175,7 +175,7 @@ Z.AI has no native function calling. The proxy implements an adapter:
 ./token-collector --headed              # visible browser (control)
 ```
 
-Collects up to 1250 device tokens via **playwright-go** with a headless Chrome (`--headless=new`, real Chrome UA, automation flag stripped). Tokens are consumed by the captcha handler and removed after use. The collector rewrites `tokens.sqlite` from scratch — stop the bridge while collecting.
+Collects up to 1250 device tokens via **playwright-go** with a stealth headless Chrome (`--headless=new`, real Chrome UA, automation flag stripped). Tokens are consumed by the captcha solver and removed after use. The collector **appends** to `tokens.sqlite` (`INSERT OR IGNORE` behind a healed `UNIQUE(token)` index), so a running bridge picks up refills without a restart — no need to stop it while collecting.
 
 ---
 
@@ -269,10 +269,8 @@ Optional CLI flags (override env / defaults):
 
 ## License
 
-Provided as-is for educational and interoperability purposes — see [LICENSE](LICENSE).
+Provided as-is for educational and interoperability purposes — see [LICENSE](LICENSE). Use responsibly and in accordance with Z.AI's terms of service.
 
 ## ⚠️ Disclaimer
 
 This software is provided **for educational and interoperability purposes only**, "AS IS", without warranty of any kind. The author is not responsible for any misuse or consequences — responsibility lies entirely on the end user. Use in accordance with Z.AI's Terms of Service. Not affiliated with Z.AI or Alibaba Cloud.
-
-> ПО предоставляется исключительно в образовательных и ознакомительных целях, «как есть». Автор не несёт ответственности за использование.

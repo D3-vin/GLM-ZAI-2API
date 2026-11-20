@@ -430,9 +430,11 @@ func tryCollect(browser playwright.Browser, total int, outPath string) error {
 	}
 	fmt.Println("  Send clicked")
 
-	// z_um appears asynchronously after the first send (SDK injection).
-	if err := waitForZUM(page); err != nil {
-		return fmt.Errorf("token endpoint not ready: %w", err)
+	// nov09: window.z_um no longer exists (measured live: typeof === 'undefined').
+	// chat.z.ai now keeps a guest JWT in localStorage.token immediately after
+	// load, so there is no SDK to wait for -- only the key to appear.
+	if err := waitForLocalToken(page); err != nil {
+		return fmt.Errorf("token not present in localStorage: %w", err)
 	}
 
 	fmt.Println("  Collecting tokens...")
@@ -445,12 +447,22 @@ func tryCollect(browser playwright.Browser, total int, outPath string) error {
 	}
 	ch := make(chan evalResult, 1)
 	go func() {
+		// nov09: one JWT in localStorage.token, not one per call. A guest
+		// session issues a single token, so "total" is an upper bound: read it
+		// once, then mint fresh ones by reloading only if more are requested.
 		val, err := page.Evaluate(`async (total) => {
-			const out = new Array(total);
+			const out = [];
+			const read = () => {
+				const t = localStorage.getItem('token');
+				return (t && t.trim()) ? t.trim() : '';
+			};
 			for (let i = 0; i < total; i++) {
-				const tok = window.z_um.getToken();
-				out[i] = (tok && typeof tok.then === 'function') ? await tok : tok;
+				const tok = read();
+				if (!tok) break;
+				if (!out.includes(tok)) out.push(tok);
 				if (i % 50 === 0) await new Promise(r => setTimeout(r, 0));
+				// a fresh guest token needs a fresh page; stop at first repeat
+				if (out.length > 0 && i > 0) break;
 			}
 			return out;
 		}`, total)
@@ -494,19 +506,30 @@ func tryCollect(browser playwright.Browser, total int, outPath string) error {
 	return nil
 }
 
-// waitForZUM polls until window.z_um.getToken is defined — the SDK is
-// injected asynchronously after the first send.
-func waitForZUM(page playwright.Page) error {
+// waitForLocalToken polls until localStorage.token holds a JWT.
+//
+// Replaces waitForZUM (nov09). Z.AI dropped the window.z_um SDK: it is now
+// undefined on a freshly loaded chat page, so the old 30s poll could only ever
+// time out. The guest JWT is written to localStorage.token by the app itself,
+// usually within the first seconds of load -- nothing else to wait for.
+func waitForLocalToken(page playwright.Page) error {
 	deadline := time.Now().Add(zumWaitTimeout)
+	var lastErr error
 	for {
-		ready, err := page.Evaluate(`typeof window.z_um !== 'undefined' && typeof window.z_um.getToken === 'function'`)
-		if err == nil {
-			if b, ok := ready.(bool); ok && b {
-				return nil
-			}
+		ready, err := page.Evaluate(`(() => {
+			const t = localStorage.getItem('token');
+			return !!(t && t.trim().length > 20);
+		})()`)
+		if err != nil {
+			lastErr = err
+		} else if b, ok := ready.(bool); ok && b {
+			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout waiting for z_um")
+			if lastErr != nil {
+				return fmt.Errorf("timeout waiting for localStorage.token: %w", lastErr)
+			}
+			return fmt.Errorf("timeout waiting for localStorage.token")
 		}
 		time.Sleep(250 * time.Millisecond)
 	}

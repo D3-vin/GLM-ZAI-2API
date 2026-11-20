@@ -32,7 +32,7 @@ var baseURL = "https://chat.z.ai"
 
 const (
 	saltKey          = "key-@@@@)))()((9))-xxxx&&&%%%%%"
-	defaultFEVersion = "prod-fe-1.0.185"
+	defaultFEVersion = "1.1.128"
 	sessionTTL       = 30 * time.Minute
 )
 
@@ -237,7 +237,12 @@ func (s *ZaiSession) generateSignature(prompt, token, userID string) string {
 
 // ── Scrape fe_version from Z.AI homepage ──
 
-var feVersionRegex = regexp.MustCompile(`prod-fe-\d+\.\d+\.\d+`)
+// Z.AI's frontend sends the BARE semver in X-FE-Version ("1.1.128"), while the
+// asset path carries it with a prefix ("prod-fe-1.1.128/assets/..."). Sending
+// the prefixed form makes the server see an unparseable version and answer
+// code 426 "client version outdated. Minimum required: 1.0.91" -- measured
+// live 2026-11-09. Capture only the numeric part.
+var feVersionRegex = regexp.MustCompile(`prod-fe-(\d+\.\d+\.\d+)`)
 
 func (s *ZaiSession) scrapeConfig() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -256,7 +261,7 @@ func (s *ZaiSession) scrapeConfig() {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if m := feVersionRegex.FindSubmatch(body); m != nil {
-		s.feVersion = string(m[0])
+		s.feVersion = string(m[1])
 		log.Printf("[Config] fe_version: %s", s.feVersion)
 	}
 }
@@ -434,14 +439,22 @@ func (s *ZaiSession) initFromAccounts(primary string) bool {
 	}
 
 	for i, tok := range candidates {
+		// Skip accounts still under a definitive dead verdict (persisted
+		// across restarts by poolstate.go). Saves a probe round-trip + a
+		// burned device-token per restarted dead account.
+		if !poolAccountUsable(tok) {
+			continue
+		}
 		status, body := probeZaiAccount(tok)
 		switch classifyAuthCheck(status, body) {
 		case "alive":
 			log.Printf("[Session] Account %d/%d accepted (HTTP %d)", i+1, len(candidates), status)
 			s.setHardcodedAccount(tok, body)
+			recordVerdict(tok, "alive")
 			return true
 		case "dead":
 			log.Printf("[Session] Account %d/%d unusable (HTTP %d) — trying next", i+1, len(candidates), status)
+			recordVerdict(tok, "dead")
 		default:
 			// Network/parse ambiguity: accept locally like the old offline-
 			// tolerant fast path so a flaky network never bricks startup.
@@ -573,7 +586,14 @@ func postReq(ctx context.Context, url, body string, headers map[string]string) s
 // ── Z.AI request body ──
 
 type zaiRequestBody struct {
-	Model              string                 `json:"model"`
+	Model string `json:"model"`
+	// ID is the request-level message id. Z.AI rejects the whole call with
+	// MISSING_MESSAGE_ID ("message id (id) is required") when it is absent —
+	// PROVEN by live probe nov09: top-level id clears the error, an id inside
+	// each message does NOT. Must therefore sit at the top level, not in
+	// messages[] (the earlier withMessageIDs fix was aiming at the wrong
+	// level and left the 400 in place).
+	ID                 string                 `json:"id"`
 	ChatID             string                 `json:"chat_id"`
 	Messages           []json.RawMessage      `json:"messages"`
 	SignaturePrompt    string                 `json:"signature_prompt"`
@@ -606,6 +626,11 @@ type sendOpts struct {
 	// as the top-level "files" array on the completion request. nil for
 	// text-only requests.
 	files []map[string]interface{}
+	// captchaParam is the pre-resolved captcha payload for this request
+	// (preflight.go). When non-empty sendToZAI skips its own resolution,
+	// which matters because every resolution burns a single-use device
+	// token. Empty = resolve locally (non-streaming and auxiliary paths).
+	captchaParam string
 }
 
 // sendToZAI sends a chat request to Z.AI, calling onContent for each
@@ -661,6 +686,9 @@ func (s *Server) sendToZAI(ctx context.Context, prompt string, opts sendOpts, on
 		case err == errZAIUnauthorized && attempt+1 < zaiSendAttempts():
 			// Dead account or expired session: rotate to the next Z.AI
 			// account (pool) and re-initialize before the next attempt.
+			if cur, _, _, _, _ := s.zaiSession.snapshot(); cur != "" {
+				recordVerdict(cur, "dead")
+			}
 			next := rotateZaiAccount(s.cfg.ZAIToken)
 			log.Printf("[ZAI] unauthorized/blocked — rotating account, next candidate %s...", shortToken(next))
 			s.zaiSession.markUninitialized()
@@ -740,6 +768,29 @@ func (s *Server) applyReasoningEffort(featuresMap map[string]interface{}, modelI
 		modelID, effort)
 }
 
+// withMessageIDs ensures every forwarded message carries an id. Z.AI requires
+// one per message (MISSING_MESSAGE_ID otherwise); OpenAI-shaped clients omit it,
+// so it is generated here and existing ids are preserved untouched.
+func withMessageIDs(msgs []json.RawMessage) []json.RawMessage {
+	out := make([]json.RawMessage, 0, len(msgs))
+	for _, raw := range msgs {
+		var m map[string]interface{}
+		if err := json.Unmarshal(raw, &m); err != nil {
+			out = append(out, raw)
+			continue
+		}
+		if id, _ := m["id"].(string); strings.TrimSpace(id) == "" {
+			m["id"] = uuidV4()
+			if patched, err := json.Marshal(m); err == nil {
+				out = append(out, patched)
+				continue
+			}
+		}
+		out = append(out, raw)
+	}
+	return out
+}
+
 func (s *Server) doZAIRequest(ctx context.Context, prompt string, opts sendOpts, onContent, onReasoning func(string)) (string, string, error) {
 	zs := s.zaiSession
 	zs.mu.Lock()
@@ -759,17 +810,19 @@ func (s *Server) doZAIRequest(ctx context.Context, prompt string, opts sendOpts,
 		"x-signature":   signature,
 	}
 
-	// Forward structured messages, NOT flattened prompt
+	// Forward structured messages, NOT flattened prompt.
+	// Z.AI rejects a message without an id ("MISSING_MESSAGE_ID"), and the
+	// OpenAI client shape never sends one -- measured live 2026-11-09.
 	var forwardedMessages []json.RawMessage
 	if len(opts.clientMessages) > 0 {
-		forwardedMessages = opts.clientMessages
+		forwardedMessages = withMessageIDs(opts.clientMessages)
 	} else {
 		// Fallback: session messages + new user message
 		for _, m := range opts.messages {
 			raw, _ := json.Marshal(m)
 			forwardedMessages = append(forwardedMessages, raw)
 		}
-		userMsg, _ := json.Marshal(map[string]string{"role": "user", "content": prompt})
+		userMsg, _ := json.Marshal(map[string]string{"id": uuidV4(), "role": "user", "content": prompt})
 		forwardedMessages = append(forwardedMessages, userMsg)
 	}
 
@@ -784,8 +837,13 @@ func (s *Server) doZAIRequest(ctx context.Context, prompt string, opts sendOpts,
 		}
 	}
 
-	// Get captcha param — now a direct in-process call, no named pipe
-	captchaParam := computeCaptchaParam(s, s.tokens)
+	// Get captcha param. A streaming request already resolved it in
+	// preflightCaptcha (before the 200 went out) — reuse it rather than
+	// burning a second single-use device token for the same request.
+	captchaParam := opts.captchaParam
+	if captchaParam == "" {
+		captchaParam = computeCaptchaParam(s, s.tokens)
+	}
 	if captchaParam == "" {
 		return "", "", fmt.Errorf("captcha verification failed — check tokens.sqlite")
 	}
@@ -799,8 +857,13 @@ func (s *Server) doZAIRequest(ctx context.Context, prompt string, opts sendOpts,
 	featuresPayload["flags"] = []interface{}{}
 	featuresPayload["image_generation"] = false
 
+	// Request-level id: Z.AI demands it as a TOP-LEVEL field (see zaiRequestBody.ID).
+	// A per-message id does not satisfy the check.
+	requestID := uuidV4()
+
 	reqBody := zaiRequestBody{
 		Model:              opts.model,
+		ID:                 requestID,
 		ChatID:             opts.chatID,
 		Messages:           forwardedMessages,
 		SignaturePrompt:    prompt,
