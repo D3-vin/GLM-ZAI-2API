@@ -573,6 +573,7 @@ func postReq(ctx context.Context, url, body string, headers map[string]string) s
 // ── Z.AI request body ──
 
 type zaiRequestBody struct {
+	ID                 string                 `json:"id"`
 	Model              string                 `json:"model"`
 	ChatID             string                 `json:"chat_id"`
 	Messages           []json.RawMessage      `json:"messages"`
@@ -800,6 +801,7 @@ func (s *Server) doZAIRequest(ctx context.Context, prompt string, opts sendOpts,
 	featuresPayload["image_generation"] = false
 
 	reqBody := zaiRequestBody{
+		ID:                 uuidV4(),
 		Model:              opts.model,
 		ChatID:             opts.chatID,
 		Messages:           forwardedMessages,
