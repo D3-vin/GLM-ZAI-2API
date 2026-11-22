@@ -28,16 +28,20 @@ import "fmt"
 // an exhausted pool, or a Z.AI session that cannot mint a param are all
 // transient (tokens are minted in batches), and a 5xx makes the caller retry
 // and the alerting fire. An empty 200 does neither.
+//
+// ВАЖНО (22.11.2026): ранняя проверка `s.tokens == nil` / `Count() == 0`
+// больше НЕ отказывает. Основной путь минта — node-солвер (captcha_node/),
+// ему tokens.sqlite не нужен вообще; device-token стал фолбэком. Здесь стоял
+// `return` при пустом tokens.sqlite, и это полностью отключало солвер на
+// стриминговом пути — при том что в базе было 0 токенов и мост «работал»
+// только потому, что non-stream шёл мимо этой функции.
 func (s *Server) preflightCaptcha(model string, opts sendOpts) (string, error) {
-	if s == nil || s.tokens == nil {
-		return "", fmt.Errorf("captcha unavailable: token store not loaded (tokens.sqlite missing)")
-	}
-	if n := s.tokens.Count(); n == 0 {
-		return "", fmt.Errorf("captcha unavailable: tokens.sqlite holds 0 device tokens — run token-collector")
+	if s == nil {
+		return "", fmt.Errorf("captcha unavailable: server not initialized")
 	}
 	param := computeCaptchaParam(s, s.tokens)
 	if param == "" {
-		return "", fmt.Errorf("captcha unavailable: pool exhausted or every device token was rejected — see [captcha] log lines")
+		return "", fmt.Errorf("captcha unavailable: node-solver exhausted retries and no device tokens left — see [captcha] log lines")
 	}
 	return param, nil
 }

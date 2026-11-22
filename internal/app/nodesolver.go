@@ -38,9 +38,16 @@ const (
 	nodeSolverPrefix = "no8xfe"
 
 	// nodeSolverRetries — сколько процессов запускать на один минт. pe-stall
-	// лечится именно повтором; 5 с запасом перекрывает наблюдаемый worst case
-	// (4 попытки из 6 в параллельном замере).
-	nodeSolverRetries = 5
+	// лечится именно повтором. Замер 22.11 на 12 прогонах: p(успех)=0.833,
+	// стрики stall'ов до 2. 8 попыток дают P(полный провал)=(1-0.833)^8≈9e-7;
+	// 5 попыток давали 1.3e-4 — и на этой границе мы реально поймали FAIL,
+	// поэтому запас поднят.
+	nodeSolverRetries = 8
+
+	// nodeSolverRetryDelay — пауза между попытками. Без неё 8 процессов
+	// молотят edge подряд (наблюдали 5 stall'ов кряду за 45 с) и, похоже,
+	// сами провоцируют троттлинг. Пауза даёт Aliyun сменить pe-байткод.
+	nodeSolverRetryDelay = 700 * time.Millisecond
 
 	// nodeSolverTimeout — один процесс солвера. Успех укладывается в 3.5-4.5s,
 	// stall обрывается на ~9s, поэтому 90s — щедрый потолок, не узкое место.
@@ -128,6 +135,13 @@ func (n *NodeSolver) Solve(ctx context.Context) (string, error) {
 		}
 		lastErr = err
 		log.Printf("[Captcha] node-solver попытка %d/%d: %v", attempt, nodeSolverRetries, err)
+		if attempt < nodeSolverRetries {
+			select {
+			case <-time.After(nodeSolverRetryDelay):
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		}
 	}
 	return "", fmt.Errorf("все %d попыток солвера провалились: %w", nodeSolverRetries, lastErr)
 }

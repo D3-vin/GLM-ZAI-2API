@@ -839,13 +839,17 @@ func (s *Server) doZAIRequest(ctx context.Context, prompt string, opts sendOpts,
 
 	// Get captcha param. A streaming request already resolved it in
 	// preflightCaptcha (before the 200 went out) — reuse it rather than
-	// burning a second single-use device token for the same request.
+	// minting a second single-use param for the same request.
 	captchaParam := opts.captchaParam
 	if captchaParam == "" {
 		captchaParam = computeCaptchaParam(s, s.tokens)
 	}
 	if captchaParam == "" {
-		return "", "", fmt.Errorf("captcha verification failed — check tokens.sqlite")
+		// Текст ошибки намеренно описывает ОБА пути: основной сейчас —
+		// node-солвер (captcha_node/), фолбэк — device-token из tokens.sqlite.
+		// Раньше здесь стояло "check tokens.sqlite", и это уводило диагностику
+		// в мёртвый путь, когда tokens.sqlite был пуст, а солвер стопорился.
+		return "", "", fmt.Errorf("captcha verification failed — node-solver exhausted retries (см. captcha_node/) или пуст tokens.sqlite (фолбэк)")
 	}
 
 	// Features payload from dynamically resolved per-model features
