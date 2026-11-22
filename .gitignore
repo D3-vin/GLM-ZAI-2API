@@ -6,6 +6,12 @@
 *.test
 *.out
 
+# captcha_node: солвер (D3-vin/Zcode2Api) — ставится `npm install` в этом каталоге.
+# node_modules 27 МБ и CDN-кэш в git не кладём; solver.js/package.json — tracked.
+captcha_node/node_modules/
+captcha_node/cdn-cache/
+captcha_node/package-lock.json
+
 # Go workspace file
 go.work
 

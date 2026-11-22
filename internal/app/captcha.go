@@ -6,6 +6,7 @@ package app
 import (
 	"bytes"
 	"compress/zlib"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -608,6 +609,19 @@ func computeCaptchaParam(s *Server, tokenStore *TokenStore) string {
 	captchaMu.Lock()
 	defer captchaMu.Unlock()
 
+	// 1) node-солвер — единственный путь, который проходит edge: параметр
+	// собирается настоящим фронтовым device VM, а не пересобирается из
+	// device-token. Замер 22.11: device-token путь даёт F001/F017, солвер —
+	// ответ модели (3/3 stream, 4/4 non-stream).
+	if solver := getNodeSolver(); solver != nil && solver.Available() {
+		if param, err := solver.Solve(context.Background()); err == nil && param != "" {
+			return param
+		} else if err != nil {
+			captchaLog("node-solver не смог: " + err.Error())
+		}
+	}
+
+	// 2) Фолбэк: старый device-token путь (оставлен, пока жив tokens.sqlite).
 	if tokenStore == nil {
 		captchaLog("No token store available — tokens.sqlite missing")
 		return ""
